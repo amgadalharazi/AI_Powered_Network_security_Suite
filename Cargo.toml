@@ -1,0 +1,11 @@
+[package]
+name = "Network_security"
+version = "0.1.0"
+edition = "2024"
+authors = ["AmgaD <amgadalhrazi@gmail.com"]
+
+[dependencies]
+argparse = "*"
+pcap = "*"
+pnet = "0.34"
+ctrlc = "3.4"
