@@ -1,19 +1,18 @@
-extern crate argparse;
+// src/sniffing/packet_sniffing.rs
 extern crate pcap;
 
-//use argparse::{ArgumentParser, Store, StoreTrue};
-use pcap::{Capture, Device};
 use super::visualization::Visualizer;
-use std::collections::HashMap;
+use crate::ltm::monitor::LiveTrafficMonitor;
+use pcap::{Capture, Device};
 use std::time::{Duration, Instant};
 
 pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
-    let mut print_devices: bool = false;
-    let mut requested_device_s: String = "en0".to_string();
-    let mut verbose: bool = false;
-    let mut visualize: bool = false;
+    let mut print_devices = false;
+    let mut requested_device_s = "en0".to_string();
+    let mut verbose = false;
+    let mut visualize = false;
 
-    // Manual argument parsing to avoid argparse issues
+    // Simple argument parser
     let args: Vec<String> = std::env::args().collect();
     let mut i = 0;
     while i < args.len() {
@@ -21,7 +20,6 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
             "--visualize" | "-V" | "--viz" => visualize = true,
             "--verbose" => verbose = true,
             "-v" => {
-                // Only set verbose if -V wasn't specified
                 if i > 0 && args.get(i) == Some(&"-V".to_string()) {
                     visualize = true;
                 } else {
@@ -32,7 +30,7 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
             "--device" | "-d" => {
                 if i + 1 < args.len() {
                     requested_device_s = args[i + 1].clone();
-                    i += 1; // Skip next argument
+                    i += 1;
                 }
             }
             _ => {}
@@ -40,96 +38,43 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
         i += 1;
     }
 
-    // Debug output
-    println!("[*] Configuration:");
-    println!("[*]   Verbose: {}", verbose);
-    println!("[*]   Visualize: {}", visualize);
-    println!("[*]   Device: {}", requested_device_s);
-    println!();
-
-    // Handle print devices first
     if print_devices {
-        match Device::list() {
-            Ok(devices) => {
-                println!("\nAvailable devices:");
-                println!("{:=<60}", "");
-                for device in devices {
-                    println!("  Device: {:?}", device.name);
-                    println!("  Description: {:?}", device.desc);
-                    println!("{:-<60}", "");
-                }
-                return;
-            }
-            Err(e) => {
-                println!("[!] Error listing devices: {}", e);
-                return;
+        if let Ok(devices) = Device::list() {
+            println!("\nAvailable devices:");
+            for dev in devices {
+                println!("  {} - {:?}", dev.name, dev.desc);
             }
         }
+        return;
     }
 
-    // Get the requested device
-    let devices = match Device::list() {
-        Ok(d) => d,
-        Err(_) => {
-            println!("[!] No devices found...");
-            return;
-        }
-    };
-
-    let requested_device = match devices.iter().find(|d| d.name == requested_device_s) {
-        Some(device) => {
-            println!("[+] Device {} selected!", requested_device_s);
-            device.clone()
-        }
-        None => {
-            println!("[!] Device {} not found!", requested_device_s);
-            println!("[*] Available devices:");
-            for d in &devices {
-                println!("    - {}", d.name);
-            }
-            return;
-        }
-    };
+    let devices = Device::list().expect("No devices found");
+    let device = devices
+        .iter()
+        .find(|d| d.name == requested_device_s)
+        .unwrap_or_else(|| panic!("Device {} not found", requested_device_s))
+        .clone();
 
     if enable_spoofing {
         println!("[*] ARP poisoning enabled");
         println!("[*] Target: {}", target_ip);
         println!("[*] Gateway: {}", gateway_ip);
-        println!("[*] Capturing poisoned traffic...\n");
     }
 
-    let mut cap = match Capture::from_device(requested_device) {
-        Ok(cap) => match cap.open() {
-            Ok(c) => c,
-            Err(e) => {
-                println!("[!] Failed to open device: {}", e);
-                return;
-            }
-        },
-        Err(e) => {
-            println!("[!] Failed to create capture: {}", e);
-            return;
-        }
-    };
+    let mut cap = Capture::from_device(device)
+        .expect("Failed to create capture")
+        .open()
+        .expect("Failed to open device");
 
     std::fs::create_dir_all("./rslts").unwrap();
-    
     let filename = if enable_spoofing {
-        "./rslts/poisoned_traffic.pcap".to_string()
+        "./rslts/poisoned_traffic.pcap"
     } else {
-        "./rslts/capture.pcap".to_string()
+        "./rslts/capture.pcap"
     };
-    
-    let mut file = match cap.savefile(&filename) {
-        Ok(f) => f,
-        Err(e) => {
-            println!("[!] Failed to create pcap file: {}", e);
-            return;
-        }
-    };
-
+    let mut file = cap.savefile(filename).expect("Failed to create pcap file");
     println!("[*] Saving packets to {}", filename);
-    
+
     if visualize {
         println!("\n╔══════════════════════════════════════════════════╗");
         println!("║         Live Packet Visualization Active         ║");
@@ -137,36 +82,45 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
     } else {
         println!("[*] Press Ctrl+C to stop...\n");
     }
-    
-    let mut packet_count: u64 = 0;
-    let mut protocol_stats: HashMap<String, u64> = HashMap::new();
-    let start_time = Instant::now();
-    let mut last_print = Instant::now();
+
+    let mut ltm = LiveTrafficMonitor::new();
     let mut visualizer = Visualizer::new();
+    let start_time = Instant::now();
+    let mut last_update = Instant::now();
 
     while let Ok(packet) = cap.next_packet() {
-        packet_count += 1;
-        
+        let proto = guess_protocol(&packet);
+        ltm.update(&proto, packet.len());
+
         if visualize {
-            let proto = guess_protocol(&packet);
-            *protocol_stats.entry(proto.clone()).or_insert(0) += 1;
-            
             let http_host = extract_http_host(&packet);
-            
-            if last_print.elapsed() >= Duration::from_secs(1) {
-                visualizer.render(&protocol_stats, packet_count, start_time.elapsed(), http_host);
-                last_print = Instant::now();
+            if last_update.elapsed() >= Duration::from_secs(1) {
+                visualizer.render(
+                    &ltm.protocol_stats,
+                    ltm.total_packets,
+                    start_time.elapsed(),
+                    ltm.bandwidth_mbps(),
+                    ltm.packet_rate(),
+                    http_host,
+                );
+                last_update = Instant::now();
             }
         } else if verbose {
-            let proto = guess_protocol(&packet);
-            println!("[#{}] {} bytes | Protocol: {}", packet_count, packet.len(), proto);
-            
+            println!(
+                "[#{}] {} bytes | Protocol: {}",
+                ltm.total_packets,
+                packet.len(),
+                proto
+            );
             if let Some(host) = extract_http_host(&packet) {
                 println!("  └─ HTTP Host: {}", host);
             }
         } else {
-            print!("\r[*] Packets captured: {} | Time: {:.1}s", 
-                packet_count, start_time.elapsed().as_secs_f64());
+            print!(
+                "\r[*] Packets captured: {} | Time: {:.1}s",
+                ltm.total_packets,
+                start_time.elapsed().as_secs_f64()
+            );
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
         }
 
@@ -199,9 +153,7 @@ fn guess_protocol(packet: &pcap::Packet) -> String {
 }
 
 fn extract_http_host(packet: &pcap::Packet) -> Option<String> {
-    let data = &packet[..];
-    let data_str = String::from_utf8_lossy(data);
-    
+    let data_str = String::from_utf8_lossy(&packet[..]);
     if data_str.contains("Host: ") {
         for line in data_str.lines() {
             if line.starts_with("Host: ") {

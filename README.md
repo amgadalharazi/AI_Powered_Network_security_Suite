@@ -135,7 +135,7 @@ src/
 sudo ip neigh flush all
 
 # macOS
-sudo arp -d -a
+
 
 # Windows (Admin)
 netsh interface ip delete arpcache
