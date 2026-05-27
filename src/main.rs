@@ -12,8 +12,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     println!("╔════════════════════════════════════════╗");
-    println!("║   Network Security Tool v1.0          ║");
-    println!("║   Sniffer + ARP Poisoning             ║");
+    println!("║   Network Security Tool v1.0           ║");
+    println!("║   Sniffer + ARP Poisoning              ║");
     println!("╚════════════════════════════════════════╝\n");
 
     if args.len() < 2 {

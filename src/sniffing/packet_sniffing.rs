@@ -1,10 +1,7 @@
-// src/sniffing/packet_sniffing.rs
 extern crate pcap;
 
-use super::visualization::Visualizer;
 use crate::ltm::monitor::LiveTrafficMonitor;
-use pcap::{Capture, Device};
-use std::time::{Duration, Instant};
+use pcap::{Capture, Device, Error};
 
 pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
     let mut print_devices = false;
@@ -20,7 +17,7 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
             "--visualize" | "-V" | "--viz" => visualize = true,
             "--verbose" => verbose = true,
             "-v" => {
-                if i > 0 && args.get(i) == Some(&"-V".to_string()) {
+                if i > 0 && args.get(i - 1).map(|s| s.as_str()) == Some("-V") {
                     visualize = true;
                 } else {
                     verbose = true;
@@ -42,7 +39,7 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
         if let Ok(devices) = Device::list() {
             println!("\nAvailable devices:");
             for dev in devices {
-                println!("  {} - {:?}", dev.name, dev.desc);
+                println!("  {} - {:?}", dev.name, dev.desc.unwrap_or_default());
             }
         }
         return;
@@ -61,10 +58,10 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
         println!("[*] Gateway: {}", gateway_ip);
     }
 
-    let mut cap = Capture::from_device(device)
-        .expect("Failed to create capture")
-        .open()
-        .expect("Failed to open device");
+    // Create inactive capture with timeout (milliseconds)
+    let mut cap_inactive = Capture::from_device(device).expect("Failed to create capture");
+    cap_inactive = cap_inactive.timeout(100); // 100 ms timeout
+    let mut cap = cap_inactive.open().expect("Failed to open device");
 
     std::fs::create_dir_all("./rslts").unwrap();
     let filename = if enable_spoofing {
@@ -83,48 +80,50 @@ pub fn start_sniffer(enable_spoofing: bool, target_ip: &str, gateway_ip: &str) {
         println!("[*] Press Ctrl+C to stop...\n");
     }
 
-    let mut ltm = LiveTrafficMonitor::new();
-    let mut visualizer = Visualizer::new();
-    let start_time = Instant::now();
-    let mut last_update = Instant::now();
+    let mut ltm = LiveTrafficMonitor::new(visualize);
 
-    while let Ok(packet) = cap.next_packet() {
-        let proto = guess_protocol(&packet);
-        ltm.update(&proto, packet.len());
+    loop {
+        match cap.next_packet() {
+            Ok(packet) => {
+                let proto = guess_protocol(&packet);
+                let http_host = if visualize { extract_http_host(&packet) } else { None };
+                ltm.update_and_render(&proto, packet.len(), http_host.clone());
 
-        if visualize {
-            let http_host = extract_http_host(&packet);
-            if last_update.elapsed() >= Duration::from_secs(1) {
-                visualizer.render(
-                    &ltm.protocol_stats,
-                    ltm.total_packets,
-                    start_time.elapsed(),
-                    ltm.bandwidth_mbps(),
-                    ltm.packet_rate(),
-                    http_host,
-                );
-                last_update = Instant::now();
+                if verbose && !visualize {
+                    println!(
+                        "[#{}] {} bytes | Protocol: {}",
+                        ltm.total_packets(),
+                        packet.len(),
+                        proto
+                    );
+                    if let Some(host) = &http_host {
+                        println!("  └─ HTTP Host: {}", host);
+                    }
+                } else if !visualize && !verbose {
+                    print!(
+                        "\r[*] Packets captured: {} | Time: {:.1}s",
+                        ltm.total_packets(),
+                        ltm.elapsed().as_secs_f64()
+                    );
+                    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                }
+
+                file.write(&packet);
             }
-        } else if verbose {
-            println!(
-                "[#{}] {} bytes | Protocol: {}",
-                ltm.total_packets,
-                packet.len(),
-                proto
-            );
-            if let Some(host) = extract_http_host(&packet) {
-                println!("  └─ HTTP Host: {}", host);
+            Err(Error::TimeoutExpired) => {
+                if visualize {
+                    ltm.maybe_render();
+                }
             }
-        } else {
-            print!(
-                "\r[*] Packets captured: {} | Time: {:.1}s",
-                ltm.total_packets,
-                start_time.elapsed().as_secs_f64()
-            );
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            Err(e) => {
+                eprintln!("[!] Error capturing packet: {}", e);
+                break;
+            }
         }
+    }
 
-        file.write(&packet);
+    if visualize {
+        ltm.final_render();
     }
 }
 
