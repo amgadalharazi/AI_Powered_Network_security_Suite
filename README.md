@@ -162,13 +162,13 @@ Visualization glitching
 
 
 ## Next Features are the following:
-- device discovery 
-- Firewall rule manager 
-- Threat detection AI 
-- Port scanner 
-- Device discovery cff
-- Intrusion alerts 
-- Log analyzer 
+
+- Device discovery
+- Firewall rule manager
+- Threat detection AI
+- Port scanner
+- Intrusion alerts
+- Log analyzer
 - Dashboard analytics
 
 
