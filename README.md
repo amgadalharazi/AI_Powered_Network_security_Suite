@@ -73,7 +73,7 @@ When running with `-V` flag, the live dashboard displays:
 ╔══════════════════════════════════════════════════╗
 ║         Network Traffic Monitor v1.0             ║
 ╠══════════════════════════════════════════════════╣
-║ Time:   45.2s  Packets:   1234  Rate:  27.3/s   ║
+║ Time:   45.2s  Packets:   1234  Rate:  27.3/s    ║
 ╠══════════════════════════════════════════════════╣
 ║  Protocol Distribution:                          ║
 ║ TCP      ████████████████░░░░░░░░    823  66.7%  ║
