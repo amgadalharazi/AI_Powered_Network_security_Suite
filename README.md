@@ -161,7 +161,7 @@ Visualization glitching
     Use a modern terminal emulator
 
 
-## Next Features are the following
+## Next Features are the following:
 - device discovery 
 - Firewall rule manager 
 - Threat detection AI 
