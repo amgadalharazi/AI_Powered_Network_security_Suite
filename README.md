@@ -160,8 +160,21 @@ Visualization glitching
     Ensure terminal supports ANSI escape codes
     Use a modern terminal emulator
 
+
+## Next Features are the following:
+
+- Device discovery
+- Firewall rule manager
+- Threat detection AI
+- Port scanner
+- Intrusion alerts
+- Log analyzer
+- Dashboard analytics
+
+
 ## License
 
 MIT License
 
 Disclaimer: This tool is for security research and network diagnostics only. Users are solely responsible for complying with applicable laws and obtaining proper authorization. The authors assume no liability for misuse or damage.
+

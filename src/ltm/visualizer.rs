@@ -3,17 +3,17 @@ use std::io::Write;
 use std::time::Duration;
 
 const RESET: &str = "\x1B[0m";
-const BOLD: &str = "\x1B[1m";
-const DIM: &str = "\x1B[2m";
+const BOLD:  &str = "\x1B[1m";
+const DIM:   &str = "\x1B[2m";
 
-const C_TCP: &str = "\x1B[38;5;39m";
-const C_UDP: &str = "\x1B[38;5;135m";
+const C_TCP:  &str = "\x1B[38;5;39m";
+const C_UDP:  &str = "\x1B[38;5;135m";
 const C_ICMP: &str = "\x1B[38;5;214m";
-const C_ARP: &str = "\x1B[38;5;42m";
+const C_ARP:  &str = "\x1B[38;5;42m";
 const C_IPV6: &str = "\x1B[38;5;205m";
-const C_OTH: &str = "\x1B[38;5;243m";
-const C_GRN: &str = "\x1B[38;5;42m";
-const C_RED: &str = "\x1B[38;5;196m";
+const C_OTH:  &str = "\x1B[38;5;243m";
+const C_GRN:  &str = "\x1B[38;5;42m";
+const C_RED:  &str = "\x1B[38;5;196m";
 
 const PROTOCOLS: &[(&str, &str)] = &[
     ("TCP", C_TCP),
@@ -26,6 +26,14 @@ const PROTOCOLS: &[(&str, &str)] = &[
 ];
 
 const BAR_WIDTH: usize = 28;
+
+/// Get terminal height from $LINES, fallback to 24.
+fn terminal_height() -> usize {
+    std::env::var("LINES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(24)
+}
 
 pub struct Visualizer {
     http_hosts: Vec<String>,
@@ -60,38 +68,39 @@ impl Visualizer {
         let arp_pct = if total > 0 { arp as f64 / total as f64 * 100.0 } else { 0.0 };
         let arp_warn = arp_pct > 15.0 && arp > 10;
 
-        let mut lines = Vec::new();
+        // Build all lines as before
+        let mut all_lines = Vec::new();
 
-        lines.push(format!("{BOLD}╔══════════════════════════════════════════════════╗{RESET}"));
-        lines.push(format!("{BOLD}║{RESET}         Network Traffic Monitor v1.0             {BOLD}║{RESET}"));
-        lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
+        all_lines.push(format!("{BOLD}╔══════════════════════════════════════════════════╗{RESET}"));
+        all_lines.push(format!("{BOLD}║{RESET}         Network Traffic Monitor v1.0             {BOLD}║{RESET}"));
+        all_lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
 
-        lines.push(format!(
+        all_lines.push(format!(
             "{BOLD}║{RESET} Time:{BOLD}{:>7.1}s{RESET}  Pkts:{BOLD}{:>7}{RESET}  BW:{BOLD}{:>6.1} Mbps{RESET}  {BOLD}║{RESET}",
             secs, total, bandwidth_mbps
         ));
-        lines.push(format!(
+        all_lines.push(format!(
             "{BOLD}║{RESET} Rate:{BOLD}{:>6.1} pkt/s{RESET}                                   {BOLD}║{RESET}",
             packet_rate
         ));
 
-        lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
-        lines.push(format!("{BOLD}║{RESET}  Protocol Distribution:                          {BOLD}║{RESET}"));
+        all_lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
+        all_lines.push(format!("{BOLD}║{RESET}  Protocol Distribution:                          {BOLD}║{RESET}"));
 
         for (proto, color) in PROTOCOLS {
             let count = stats.get(*proto).copied().unwrap_or(0);
             let pct = if total > 0 { count as f64 / total as f64 * 100.0 } else { 0.0 };
             let filled = (pct / 100.0 * BAR_WIDTH as f64) as usize;
             let empty = BAR_WIDTH - filled;
-            lines.push(format!(
+            all_lines.push(format!(
                 "{BOLD}║{RESET} {color}{BOLD}{proto:<8}{RESET} {color}{}{RESET}{DIM}{}{RESET} {count:>5} {DIM}{pct:>5.1}%{RESET} {BOLD}║{RESET}",
                 "█".repeat(filled),
                 "░".repeat(empty),
             ));
         }
 
-        lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
-        lines.push(format!("{BOLD}║{RESET}  HTTP Hosts Detected:                            {BOLD}║{RESET}"));
+        all_lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
+        all_lines.push(format!("{BOLD}║{RESET}  HTTP Hosts Detected:                            {BOLD}║{RESET}"));
         for i in 0..5 {
             if let Some(host) = self.http_hosts.iter().rev().nth(i) {
                 let truncated = if host.len() > 44 {
@@ -99,22 +108,35 @@ impl Visualizer {
                 } else {
                     host.clone()
                 };
-                lines.push(format!("{BOLD}║{RESET}  {C_GRN}•{RESET} {truncated:<44}  {BOLD}║{RESET}"));
+                all_lines.push(format!("{BOLD}║{RESET}  {C_GRN}•{RESET} {truncated:<44}  {BOLD}║{RESET}"));
             } else {
-                lines.push(format!("{BOLD}║{RESET}    {:<46}  {BOLD}║{RESET}", ""));
+                all_lines.push(format!("{BOLD}║{RESET}    {:<46}  {BOLD}║{RESET}", ""));
             }
         }
 
-        lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
+        all_lines.push(format!("{BOLD}╠══════════════════════════════════════════════════╣{RESET}"));
         if arp_warn {
-            lines.push(format!("{BOLD}║{RESET}  {C_RED}{BOLD}⚠  ARP anomaly — possible spoofing!{RESET}             {BOLD}║{RESET}"));
+            all_lines.push(format!(
+                "{BOLD}║{RESET}  {C_RED}{BOLD}⚠  ARP anomaly — possible spoofing!{RESET}             {BOLD}║{RESET}"
+            ));
         } else {
-            lines.push(format!("{BOLD}║{RESET}    {:<46}  {BOLD}║{RESET}", ""));
+            all_lines.push(format!("{BOLD}║{RESET}    {:<46}  {BOLD}║{RESET}", ""));
         }
+        all_lines.push(format!("{BOLD}╚══════════════════════════════════════════════════╝{RESET}"));
+        all_lines.push(format!("{DIM}Press Ctrl+C to stop...{RESET}"));
 
-        lines.push(format!("{BOLD}╚══════════════════════════════════════════════════╝{RESET}"));
-        lines.push(format!("{DIM}Press Ctrl+C to stop...{RESET}"));
+        // ── TRUNCATE to avoid scrolling ────────────────────────────────────
+        let term_height = terminal_height();
+        // Reserve 1 line so we never write at the absolute bottom
+        let max_visible = if term_height > 1 { term_height - 1 } else { 1 };
 
+        // Slice down to the allowed number of lines
+        let lines: Vec<&str> = all_lines.iter()
+            .map(String::as_str)
+            .take(max_visible)
+            .collect();
+
+        // ── Original cursor‑up rendering (now safe) ────────────────────────
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         if let Some(prev) = self.last_line_count {

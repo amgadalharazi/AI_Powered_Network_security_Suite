@@ -9,3 +9,5 @@ argparse = "*"
 pcap = "*"
 pnet = "0.34"
 ctrlc = "3.4"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
