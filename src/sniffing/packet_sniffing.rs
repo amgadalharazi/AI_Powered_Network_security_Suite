@@ -1,10 +1,10 @@
-extern crate pcap;
-
+use crate::AiDetection::{AIDetector, FlowTracker};
+use crate::firewall_rule_manager::FirewallManager;
 use crate::ltm::monitor::LiveTrafficMonitor;
 use pcap::{Capture, Device, Error};
+use std::net::{IpAddr, Ipv4Addr};
+use std::sync::{Arc, Mutex};
 
-/// Configuration passed in from main — args are parsed once there,
-/// so this function never needs to touch std::env::args() itself.
 pub struct SnifferConfig {
     pub device: String,
     pub verbose: bool,
@@ -13,6 +13,14 @@ pub struct SnifferConfig {
     pub enable_spoofing: bool,
     pub target_ip: String,
     pub gateway_ip: String,
+    /// Path to the ONNX model (empty = AI detection disabled)
+    pub ai_model_path: String,
+    /// Path to the scaler JSON produced by main.py
+    pub ai_scaler_path: String,
+    /// Probability threshold above which a flow is flagged as an attack
+    pub ai_threshold: f32,
+    /// When true, auto-block detected attack sources via the firewall
+    pub ai_auto_block: bool,
 }
 
 impl Default for SnifferConfig {
@@ -25,6 +33,10 @@ impl Default for SnifferConfig {
             enable_spoofing: false,
             target_ip: String::new(),
             gateway_ip: String::new(),
+            ai_model_path: String::new(),
+            ai_scaler_path: String::new(),
+            ai_threshold: 0.5,
+            ai_auto_block: false,
         }
     }
 }
@@ -53,27 +65,55 @@ pub fn start_sniffer(config: SnifferConfig) {
         println!("[*] Gateway: {}", config.gateway_ip);
     }
 
+    // ── Optional AI detector ──────────────────────────────────────────────────
+    let mut ai_detector: Option<AIDetector> = if !config.ai_model_path.is_empty() {
+        match AIDetector::new(
+            &config.ai_model_path,
+            &config.ai_scaler_path,
+            config.ai_threshold,
+        ) {
+            Ok(det) => {
+                println!(
+                    "[AI] Detector loaded (threshold={:.2})",
+                    config.ai_threshold
+                );
+                Some(det)
+            }
+            Err(e) => {
+                eprintln!("[AI] Failed to load detector: {} — running without AI", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Flow tracker: expire flows idle for 60 s
+    let mut flow_tracker = FlowTracker::new(60);
+
+    // Firewall manager (shared so auto_block can write rules)
+    let fw_manager: Option<Arc<Mutex<FirewallManager>>> = if config.ai_auto_block {
+        Some(Arc::new(Mutex::new(FirewallManager::new(
+            "firewall_rules.json",
+        ))))
+    } else {
+        None
+    };
+
     let mut cap = Capture::from_device(device)
         .expect("Failed to create capture")
-        .timeout(100) // 100 ms — keeps the loop responsive for visualize ticks
+        .timeout(100)
         .open()
         .expect("Failed to open device");
 
-    std::fs::create_dir_all("./rslts").unwrap();
-    let filename = if config.enable_spoofing {
-        "./rslts/poisoned_traffic.pcap"
-    } else {
-        "./rslts/capture.pcap"
-    };
-    let mut file = cap.savefile(filename).expect("Failed to create pcap file");
-    println!("[*] Saving packets to {}", filename);
+    println!("[*] Live capture only – pcap saving disabled for stability");
 
     if config.visualize {
         println!("\n╔══════════════════════════════════════════════════╗");
         println!("║         Live Packet Visualization Active         ║");
         println!("╚══════════════════════════════════════════════════╝\n");
     } else {
-        println!("[*] Press Ctrl+C to stop...\n");
+        println!("[*] Press Ctrl+C to stop…\n");
     }
 
     let mut ltm = LiveTrafficMonitor::new(config.visualize);
@@ -89,6 +129,43 @@ pub fn start_sniffer(config: SnifferConfig) {
                 };
 
                 ltm.update_and_render(&proto, packet.len(), http_host.clone());
+
+                // ── AI detection: feed packet into flow tracker ───────────────
+                if let Some(ref mut detector) = ai_detector {
+                    let (src_ip, dst_ip, src_port, dst_port, ip_proto) = extract_ip_fields(&packet);
+
+                    let expired_flows = flow_tracker.process_packet(
+                        src_ip,
+                        dst_ip,
+                        src_port,
+                        dst_port,
+                        ip_proto,
+                        packet.len(),
+                    );
+
+                    for (key, stats) in expired_flows {
+                        let features = stats.to_feature_vector();
+                        match detector.predict(&features) {
+                            Ok((true, prob)) => {
+                                println!(
+                                    "\x1b[91m[AI] ATTACK detected from {} → {} (proto={}, confidence={:.1}%)\x1b[0m",
+                                    key.src_ip,
+                                    key.dst_ip,
+                                    key.protocol,
+                                    prob * 100.0
+                                );
+                                if let Some(ref fw_arc) = fw_manager {
+                                    if let Ok(mut fw) = fw_arc.lock() {
+                                        fw.auto_block(&key.src_ip.to_string(), prob);
+                                    }
+                                }
+                            }
+                            Ok((false, _)) => {}
+                            Err(e) => eprintln!("[AI] predict error: {}", e),
+                        }
+                    }
+                }
+                // ─────────────────────────────────────────────────────────────
 
                 if config.verbose && !config.visualize {
                     println!(
@@ -108,11 +185,8 @@ pub fn start_sniffer(config: SnifferConfig) {
                     );
                     std::io::Write::flush(&mut std::io::stdout()).unwrap();
                 }
-
-                file.write(&packet);
             }
             Err(Error::TimeoutExpired) => {
-                // No packet arrived within the timeout window; tick the visualizer.
                 if config.visualize {
                     ltm.maybe_render();
                 }
@@ -129,19 +203,17 @@ pub fn start_sniffer(config: SnifferConfig) {
     }
 }
 
-/// Determine the protocol of a raw Ethernet frame.
-/// Handles 802.1Q VLAN-tagged frames (EtherType 0x8100) by skipping the 4-byte tag,
-/// which shifts the real EtherType and IP protocol fields forward.
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
 fn guess_protocol(packet: &pcap::Packet) -> String {
     if packet.len() < 14 {
         return "Short".to_string();
     }
 
-    // Check for 802.1Q VLAN tag at offset 12 and adjust offsets accordingly.
     let (ethertype_offset, ip_proto_offset) = if &packet[12..14] == [0x81, 0x00] {
-        (16usize, 27usize) // VLAN tag present: EtherType moves to byte 16, IP proto to 27
+        (16, 27)
     } else {
-        (12usize, 23usize) // Standard Ethernet
+        (12, 23)
     };
 
     if packet.len() < ethertype_offset + 2 {
@@ -177,4 +249,51 @@ fn extract_http_host(packet: &pcap::Packet) -> Option<String> {
         }
     }
     None
+}
+
+/// Parse an Ethernet frame and extract (src_ip, dst_ip, src_port, dst_port, ip_proto).
+/// Returns zeroed-out values for non-IPv4 or short packets.
+fn extract_ip_fields(packet: &pcap::Packet) -> (IpAddr, IpAddr, u16, u16, u8) {
+    let data = &packet[..];
+
+    // Need at least Ethernet (14) + IP header (20)
+    if data.len() < 34 {
+        return (
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            0,
+            0,
+            0,
+        );
+    }
+
+    // Only handle plain IPv4 (ethertype 0x0800); skip VLAN-tagged etc.
+    if &data[12..14] != [0x08, 0x00] {
+        return (
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            0,
+            0,
+            0,
+        );
+    }
+
+    let ip_proto = data[23];
+    let src_ip = IpAddr::V4(Ipv4Addr::new(data[26], data[27], data[28], data[29]));
+    let dst_ip = IpAddr::V4(Ipv4Addr::new(data[30], data[31], data[32], data[33]));
+
+    // IP header length (IHL field, lower nibble of byte 14, in 32-bit words)
+    let ihl = (data[14] & 0x0F) as usize * 4;
+    let transport_start = 14 + ihl;
+
+    let (src_port, dst_port) =
+        if (ip_proto == 6 || ip_proto == 17) && data.len() >= transport_start + 4 {
+            let sp = u16::from_be_bytes([data[transport_start], data[transport_start + 1]]);
+            let dp = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
+            (sp, dp)
+        } else {
+            (0, 0)
+        };
+
+    (src_ip, dst_ip, src_port, dst_port, ip_proto)
 }

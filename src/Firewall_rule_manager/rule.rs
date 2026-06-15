@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 pub struct FirewallRule {
     pub name: String,
     pub action: RuleAction,
-    pub protocol: String,          // "tcp", "udp", "icmp", or "any"
-    pub src_ip: String,            // "192.168.1.0/24", "any"
+    pub protocol: String, // "tcp", "udp", "icmp", or "any"
+    pub src_ip: String,   // "192.168.1.0/24", "any"
     pub dst_ip: String,
-    pub src_port: Option<u16>,     // None = any
+    pub src_port: Option<u16>, // None = any
     pub dst_port: Option<u16>,
     pub enabled: bool,
 }
@@ -30,7 +30,7 @@ impl FirewallRule {
     ) -> Self {
         let action = match action.to_lowercase().as_str() {
             "allow" => RuleAction::Allow,
-            "deny"  => RuleAction::Deny,
+            "deny" => RuleAction::Deny,
             _ => panic!("Invalid action: use 'allow' or 'deny'"),
         };
         Self {

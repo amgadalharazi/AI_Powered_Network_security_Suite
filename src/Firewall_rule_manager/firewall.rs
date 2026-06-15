@@ -3,7 +3,8 @@ use crate::firewall_rule_manager::rule::FirewallRule;
 pub fn apply_rules(rules: &Vec<FirewallRule>) {
     println!("[Firewall] Applying {} rule(s):", rules.len());
     for rule in rules.iter().filter(|r| r.enabled) {
-        println!("  - {}: {} traffic {} → {} (proto: {}, ports: {:?} → {:?})",
+        println!(
+            "  - {}: {} traffic {} → {} (proto: {}, ports: {:?} → {:?})",
             rule.name,
             match rule.action {
                 super::rule::RuleAction::Allow => "ALLOW",

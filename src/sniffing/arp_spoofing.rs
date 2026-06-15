@@ -71,10 +71,10 @@ impl ArpSpoofer {
         println!("[+] Target MAC: {}", self.target_mac.unwrap());
 
         println!("[*] Looking for gateway: {}", self.gateway_ip);
-        self.gateway_mac = Some(
-            self.get_mac_address(self.gateway_ip)
-                .ok_or_else(|| format!("Could not find MAC for gateway IP: {}", self.gateway_ip))?,
-        );
+        self.gateway_mac =
+            Some(self.get_mac_address(self.gateway_ip).ok_or_else(|| {
+                format!("Could not find MAC for gateway IP: {}", self.gateway_ip)
+            })?);
         println!("[+] Gateway MAC: {}", self.gateway_mac.unwrap());
 
         Ok(())
@@ -235,24 +235,14 @@ impl ArpSpoofer {
         if let (Some(target_mac), Some(gateway_mac)) = (self.target_mac, self.gateway_mac) {
             // Tell target: gateway_ip is at gateway_mac (not attacker_mac)
             for _ in 0..5 {
-                self.send_arp_restore(
-                    self.target_ip,
-                    target_mac,
-                    self.gateway_ip,
-                    gateway_mac,
-                )?;
+                self.send_arp_restore(self.target_ip, target_mac, self.gateway_ip, gateway_mac)?;
                 thread::sleep(Duration::from_millis(100));
             }
             println!("[+] Restored target's ARP table");
 
             // Tell gateway: target_ip is at target_mac (not attacker_mac)
             for _ in 0..5 {
-                self.send_arp_restore(
-                    self.gateway_ip,
-                    gateway_mac,
-                    self.target_ip,
-                    target_mac,
-                )?;
+                self.send_arp_restore(self.gateway_ip, gateway_mac, self.target_ip, target_mac)?;
                 thread::sleep(Duration::from_millis(100));
             }
             println!("[+] Restored gateway's ARP table");
