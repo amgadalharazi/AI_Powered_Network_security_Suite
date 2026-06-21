@@ -1,6 +1,6 @@
 # Network Security Suite
 
-A Rust-based network analysis and security testing tool featuring ARP poisoning, packet sniffing, MITM attack capabilities, **firewall rule management**, and real-time terminal visualization.
+A Rust-based network analysis and security testing tool featuring ARP poisoning, packet sniffing, MITM attack capabilities, a persistent firewall rule manager, and **real-time AI-driven intrusion detection** with automatic blocking.
 
 ## Current Features
 
@@ -12,7 +12,9 @@ A Rust-based network analysis and security testing tool featuring ARP poisoning,
 - PCAP export for offline analysis with Wireshark
 - Automatic ARP table restoration on exit
 - ARP anomaly detection with visual warnings
-- **Firewall rule manager** (add, remove, enable/disable, apply rules with JSON persistence)
+- Firewall rule manager (add, remove, enable/disable, apply rules with JSON persistence)
+- AI-based attack detection using flow-based features (ONNX runtime)
+- Automatic blocking of detected attackers via firewall integration
 
 ## Prerequisites
 
@@ -42,6 +44,7 @@ cargo build --release
 ## Commands
 
 ### Sniffing & MITM
+
 ```
 sudo cargo run -- sniff
     Start basic packet sniffer on default interface (en0)
@@ -67,6 +70,26 @@ sudo cargo run -- mitm 192.168.1.100 192.168.1.1
 cargo run -- devices
     List network devices (no root required)
 ```
+
+### AI-Powered Detection
+
+The sniffer can load a pre-trained ONNX model to classify network flows as benign or attack. When the attack probability exceeds a threshold, the source IP can be automatically blocked via the firewall.
+
+```
+sudo cargo run -- sniff --ai-model models/ids_model.onnx \
+                          --ai-scaler models/scaler.json \
+                          --ai-threshold 0.7 \
+                          --ai-block
+```
+
+| Option               | Description                                                      |
+|----------------------|------------------------------------------------------------------|
+| `--ai-model`         | Path to ONNX model (e.g., `models/ids_model.onnx`)               |
+| `--ai-scaler`        | Path to scaler JSON (mean/scale)                                 |
+| `--ai-threshold`     | Probability threshold for attack flag (default: 0.5)             |
+| `--ai-block`         | Automatically add a firewall rule to block the attacker's IP     |
+
+Detection uses **flow-based features** (packet counts, byte counts, packet length statistics, inter-arrival times) extracted from live traffic. The model is a Random Forest trained on the CIC-IDS dataset (see `AiDetection/main.py` for training).
 
 ### Firewall Rule Manager
 
@@ -114,18 +137,18 @@ When running with `-V` flag, the live dashboard displays:
 ║ IP/Other ░░░░░░░░░░░░░░░░░░░░░░░░      0   0.0%  ║
 ╠══════════════════════════════════════════════════╣
 ║  HTTP Hosts Detected:                            ║
-║  • api.github.com                                ║
-║  • stackoverflow.com                             ║
-║  • google.com                                    ║
+║  - api.github.com                                ║
+║  - stackoverflow.com                             ║
+║  - google.com                                    ║
 ╠══════════════════════════════════════════════════╣
-║  ⚠  ARP anomaly — possible spoofing!             ║
+║  [!] ARP anomaly -- possible spoofing!           ║
 ╚══════════════════════════════════════════════════╝
 Press Ctrl+C to stop...
 ```
 
 The dashboard updates every second and shows:
 - Elapsed time, total packets, packets per second
-- Protocol distribution with colored bars
+- Protocol distribution with coloured bars
 - Last 5 unique HTTP hosts detected
 - ARP anomaly warning when ARP traffic exceeds 15% of total
 
@@ -148,17 +171,22 @@ src/
 ├── main.rs                          # CLI entry point, command routing
 ├── sniffing/
 │   ├── arp_spoofing.rs              # ARP poisoning implementation
-│   ├── packet_sniffing.rs           # Packet capture and analysis
-│   └── sniffers.rs                  # Sniffer helpers
+│   ├── packet_sniffing.rs           # Packet capture and AI integration
+│   └── sniffers.rs                  # Sniffer helpers (deprecated)
 ├── ltm/
 │   ├── monitor.rs                   # Live traffic monitor
 │   └── visualizer.rs                # Terminal dashboard
-└── Firewall_rule_manager/
-    ├── mod.rs                       # Module root, public exports
-    ├── rule.rs                      # FirewallRule struct, RuleAction enum
-    ├── storage.rs                   # JSON persistence (load/save)
-    ├── firewall.rs                  # Rule application (simulation placeholder)
-    └── manager.rs                   # CRUD operations, apply, save
+├── firewall_rule_manager/
+│   ├── mod.rs                       # Module root, public exports
+│   ├── rule.rs                      # FirewallRule struct, RuleAction enum
+│   ├── storage.rs                   # JSON persistence (load/save)
+│   ├── firewall.rs                  # Rule application (simulation placeholder)
+│   └── manager.rs                   # CRUD operations, apply, save
+└── AiDetection/
+    ├── mod.rs
+    ├── ai_detector.rs               # ONNX inference wrapper
+    ├── flowtracker.rs               # Flow state and feature extraction
+    └── main.py                      # Model training script (Python)
 ```
 
 ## Security Notes
@@ -189,33 +217,19 @@ netsh interface ip delete arpcache
 | No packets captured | Verify interface has traffic and is in promiscuous mode |
 | ARP poisoning not working | Disable router ARP protection features; check reachability |
 | Visualization glitching | Use a modern terminal that supports ANSI escape codes |
-| Firewall commands not found | Make sure module files are present and deps installed |
+| Firewall commands not found | Make sure module files are present and dependencies installed |
+| AI model not loading | Verify paths; ensure ONNX and scaler files exist; check for missing dependencies |
 
 ## Planned Features
 
-- Device discovery
-- Threat detection AI
 - Port scanner
-- Intrusion alerts
-- Log analyzer
+- Intrusion alerts and logging
 - Dashboard analytics
-- **Platform-specific firewall enforcement (iptables / pfctl)**
-
-## Implemented Features
-
-- Packet sniffing with real-time visualization
-- ARP poisoning and MITM
-- Firewall rule manager (persistent, command-line CRUD)
-- Live traffic monitoring
+- Platform-specific firewall enforcement (iptables / pfctl)
+- Web-based interface
 
 ## License
 
 MIT License
 
 Disclaimer: This tool is for security research and network diagnostics only. Users are solely responsible for complying with applicable laws and obtaining proper authorization. The authors assume no liability for misuse or damage.
-
-=======
-**Disclaimer:** This tool is for security research and network diagnostics only. Users are solely responsible for complying with applicable laws and obtaining proper authorization. The authors assume no liability for misuse or damage.
-
-=======
-feel free to send me a message anytime 
